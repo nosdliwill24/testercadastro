@@ -311,7 +311,7 @@ def page_login():
         with ui.element("div").classes("auth-card"):
 
             # Brand
-            ui.element("p").classes("brand-title").bind_text_from({}, lambda: "👤  AuthApp")
+            ui.html('<p class="brand-title">👤  AuthApp</p>')
             ui.html('<p class="brand-sub">Entre na sua conta para continuar</p>')
 
             msg_area = ui.column().style("width:100%; margin-bottom:12px")
@@ -365,7 +365,7 @@ def page_register():
     with ui.column().classes("items-center justify-center").style("min-height:100vh; width:100%"):
         with ui.element("div").classes("auth-card"):
 
-            ui.element("p").classes("brand-title").bind_text_from({}, lambda: "✨  Criar Conta")
+            ui.html('<p class="brand-title">✨  Criar Conta</p>')
             ui.html('<p class="brand-sub">Preencha os dados para se cadastrar</p>')
 
             msg_area = ui.column().style("width:100%; margin-bottom:12px")
