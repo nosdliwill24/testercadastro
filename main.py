@@ -18,11 +18,12 @@ def init_db():
     with get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                username  TEXT    UNIQUE NOT NULL,
-                email     TEXT    UNIQUE NOT NULL,
-                password  TEXT    NOT NULL,
-                created_at TEXT   DEFAULT (datetime('now'))
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                username   TEXT    UNIQUE NOT NULL,
+                email      TEXT    UNIQUE NOT NULL,
+                password   TEXT    NOT NULL,
+                is_admin   INTEGER DEFAULT 0,
+                created_at TEXT    DEFAULT (datetime('now'))
             )
         """)
         conn.execute("""
@@ -36,7 +37,20 @@ def init_db():
         """)
         conn.commit()
 
-# ─── Helpers de auth ───────────────────────────────────────────────────────────
+        # Migração: adiciona is_admin se o banco já existia sem ela
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Primeiro usuário cadastrado vira admin automaticamente
+        first = conn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
+        if first:
+            conn.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (first["id"],))
+            conn.commit()
+
+# ─── Auth ──────────────────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -59,9 +73,11 @@ def register_user(username: str, email: str, password: str) -> tuple[bool, str]:
         return False, "E-mail inválido."
     try:
         with get_db() as conn:
+            count = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+            is_admin = 1 if count == 0 else 0
             conn.execute(
-                "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
-                (username.strip(), email.strip().lower(), hash_password(password)),
+                "INSERT INTO users (username, email, password, is_admin) VALUES (?, ?, ?, ?)",
+                (username.strip(), email.strip().lower(), hash_password(password), is_admin),
             )
             conn.commit()
         return True, "Conta criada com sucesso!"
@@ -81,6 +97,8 @@ def login_user(email: str, password: str) -> tuple[bool, dict | str]:
         return False, "Senha incorreta."
     return True, dict(row)
 
+# ─── Notas ─────────────────────────────────────────────────────────────────────
+
 def get_user_notes(user_id: int) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute(
@@ -98,304 +116,192 @@ def delete_note(note_id: int, user_id: int):
         conn.execute("DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id))
         conn.commit()
 
-# ─── Estilo global ─────────────────────────────────────────────────────────────
+# ─── Admin ─────────────────────────────────────────────────────────────────────
+
+def get_all_users() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT u.id, u.username, u.email, u.is_admin, u.created_at,
+                   COUNT(n.id) as note_count
+            FROM users u
+            LEFT JOIN notes n ON n.user_id = u.id
+            GROUP BY u.id
+            ORDER BY u.id ASC
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+def toggle_admin(user_id: int, current_is_admin: int):
+    new_val = 0 if current_is_admin else 1
+    with get_db() as conn:
+        conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (new_val, user_id))
+        conn.commit()
+
+def delete_user(user_id: int):
+    with get_db() as conn:
+        conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+
+def get_stats() -> dict:
+    with get_db() as conn:
+        users  = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        notes  = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
+        admins = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_admin=1").fetchone()["c"]
+        newest = conn.execute("SELECT username FROM users ORDER BY id DESC LIMIT 1").fetchone()
+    return {
+        "users": users, "notes": notes, "admins": admins,
+        "newest": newest["username"] if newest else "—",
+    }
+
+# ─── Estilo ────────────────────────────────────────────────────────────────────
 
 STYLE = """
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
-
 * { box-sizing: border-box; }
+body { margin:0; font-family:'DM Sans',sans-serif; background:#0f1117; color:#e8eaf0; min-height:100vh; }
 
-body {
-    margin: 0;
-    font-family: 'DM Sans', sans-serif;
-    background: #0f1117;
-    color: #e8eaf0;
-    min-height: 100vh;
-}
+.auth-card { background:#1a1d27; border:1px solid #2a2d3a; border-radius:16px; padding:40px; width:100%; max-width:420px; box-shadow:0 24px 64px rgba(0,0,0,.5); }
+.brand-title { font-size:28px; font-weight:700; letter-spacing:-.5px; color:#fff; margin:0 0 4px; }
+.brand-sub { font-size:14px; color:#666980; margin:0 0 32px; }
+.field-label { font-size:13px; font-weight:500; color:#9395a5; margin-bottom:6px; display:block; }
 
-.auth-card {
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
-    border-radius: 16px;
-    padding: 40px;
-    width: 100%;
-    max-width: 420px;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
-}
+.nicegui-input .q-field__control { background:#0f1117 !important; border:1px solid #2a2d3a !important; border-radius:10px !important; color:#e8eaf0 !important; }
+.nicegui-input .q-field__control:hover { border-color:#4f52d3 !important; }
 
-.brand-title {
-    font-size: 28px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-    color: #fff;
-    margin: 0 0 4px 0;
-}
+.btn-primary { background:#4f52d3 !important; color:white !important; border-radius:10px !important; font-weight:600 !important; font-size:15px !important; height:48px !important; width:100%; }
+.btn-primary:hover { background:#3d40b5 !important; }
+.link-btn { color:#7b7ef5 !important; font-size:13px !important; text-decoration:none; cursor:pointer; }
+.divider-line { border:none; border-top:1px solid #2a2d3a; margin:20px 0; }
 
-.brand-sub {
-    font-size: 14px;
-    color: #666980;
-    margin: 0 0 32px 0;
-}
+.dash-sidebar { width:240px; background:#1a1d27; border-right:1px solid #2a2d3a; min-height:100vh; padding:24px 16px; flex-shrink:0; }
+.dash-content { flex:1; padding:32px; overflow-y:auto; }
+.dash-title { font-size:22px; font-weight:700; color:#fff; margin:0; }
 
-.field-label {
-    font-size: 13px;
-    font-weight: 500;
-    color: #9395a5;
-    margin-bottom: 6px;
-    display: block;
-}
+.nav-item { display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; cursor:pointer; font-size:14px; font-weight:500; color:#9395a5; transition:all .15s; text-decoration:none; width:100%; margin-bottom:2px; }
+.nav-item:hover { background:#252836; color:#e8eaf0; }
+.nav-item.active { background:#252836; color:#7b7ef5; }
 
-.nicegui-input .q-field__control {
-    background: #0f1117 !important;
-    border: 1px solid #2a2d3a !important;
-    border-radius: 10px !important;
-    color: #e8eaf0 !important;
-}
+.stat-card { background:#1a1d27; border:1px solid #2a2d3a; border-radius:12px; padding:20px 24px; }
+.stat-label { font-size:12px; font-weight:500; color:#666980; text-transform:uppercase; letter-spacing:.5px; margin:0 0 4px; }
+.stat-value { font-size:28px; font-weight:700; color:#fff; font-family:'DM Mono',monospace; margin:0; }
 
-.nicegui-input .q-field__control:hover {
-    border-color: #4f52d3 !important;
-}
+.note-item { background:#1a1d27; border:1px solid #2a2d3a; border-radius:10px; padding:14px 16px; margin-bottom:10px; transition:border-color .2s; }
+.note-item:hover { border-color:#4f52d3; }
 
-.btn-primary {
-    background: #4f52d3 !important;
-    color: white !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    font-size: 15px !important;
-    height: 48px !important;
-    letter-spacing: 0.2px;
-    transition: background 0.2s;
-    width: 100%;
-}
+.error-msg { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3); border-radius:8px; padding:10px 14px; font-size:13px; color:#f87171; }
+.success-msg { background:rgba(34,197,94,.1); border:1px solid rgba(34,197,94,.3); border-radius:8px; padding:10px 14px; font-size:13px; color:#4ade80; }
 
-.btn-primary:hover {
-    background: #3d40b5 !important;
-}
+.table-wrap { background:#1a1d27; border:1px solid #2a2d3a; border-radius:12px; overflow:hidden; }
+.admin-table { width:100%; border-collapse:collapse; font-size:14px; }
+.admin-table th { text-align:left; padding:10px 16px; font-size:11px; font-weight:600; color:#666980; text-transform:uppercase; letter-spacing:.5px; border-bottom:1px solid #2a2d3a; }
+.admin-table td { padding:13px 16px; border-bottom:1px solid #1e2130; color:#e8eaf0; vertical-align:middle; }
+.admin-table tr:last-child td { border-bottom:none; }
+.admin-table tr:hover td { background:#1e2130; }
 
-.link-btn {
-    color: #7b7ef5 !important;
-    font-size: 13px !important;
-    text-decoration: none;
-    cursor: pointer;
-}
-
-.link-btn:hover { color: #a0a3ff !important; }
-
-.divider-line {
-    border: none;
-    border-top: 1px solid #2a2d3a;
-    margin: 20px 0;
-}
-
-/* Dashboard */
-.dash-sidebar {
-    width: 240px;
-    background: #1a1d27;
-    border-right: 1px solid #2a2d3a;
-    min-height: 100vh;
-    padding: 24px 16px;
-}
-
-.dash-content {
-    flex: 1;
-    padding: 32px;
-    overflow-y: auto;
-}
-
-.dash-title {
-    font-size: 22px;
-    font-weight: 700;
-    color: #fff;
-    margin: 0;
-}
-
-.stat-card {
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
-    border-radius: 12px;
-    padding: 20px 24px;
-}
-
-.stat-label {
-    font-size: 12px;
-    font-weight: 500;
-    color: #666980;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.stat-value {
-    font-size: 32px;
-    font-weight: 700;
-    color: #fff;
-    font-family: 'DM Mono', monospace;
-}
-
-.note-item {
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 10px;
-    transition: border-color 0.2s;
-}
-
-.note-item:hover { border-color: #4f52d3; }
-
-.nav-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 500;
-    color: #9395a5;
-    transition: all 0.15s;
-    text-decoration: none;
-    width: 100%;
-}
-
-.nav-item:hover {
-    background: #252836;
-    color: #e8eaf0;
-}
-
-.nav-item.active {
-    background: #252836;
-    color: #7b7ef5;
-}
-
-.chip-accent {
-    background: rgba(79, 82, 211, 0.15);
-    color: #7b7ef5;
-    border-radius: 6px;
-    padding: 2px 8px;
-    font-size: 12px;
-    font-weight: 600;
-}
-
-.error-msg {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    color: #f87171;
-}
-
-.success-msg {
-    background: rgba(34, 197, 94, 0.1);
-    border: 1px solid rgba(34, 197, 94, 0.3);
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    color: #4ade80;
-}
+.badge-admin { background:rgba(79,82,211,.2); color:#7b7ef5; border:1px solid rgba(79,82,211,.4); border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600; }
+.badge-user { background:rgba(102,105,128,.15); color:#9395a5; border:1px solid #2a2d3a; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600; }
 """
 
-# ─── Página de Login ────────────────────────────────────────────────────────────
+# ─── Sidebar reutilizável ───────────────────────────────────────────────────────
+
+def build_sidebar(username: str, created_at: str, is_admin: bool, active: str = "dashboard"):
+    def do_logout():
+        app.storage.user.clear()
+        ui.navigate.to("/")
+
+    with ui.column().classes("dash-sidebar").style("gap:0"):
+        ui.html(f'''
+            <div style="margin-bottom:28px">
+                <p style="font-size:18px;font-weight:700;color:#fff;margin:0 0 2px">AuthApp</p>
+                <p style="font-size:12px;color:#4f52d3;margin:0;font-weight:600">{"Admin" if is_admin else "Dashboard"}</p>
+            </div>
+        ''')
+
+        ui.html(f'<a class="nav-item {"active" if active=="dashboard" else ""}" href="/dashboard">📋  Minhas notas</a>')
+
+        if is_admin:
+            ui.html(f'<a class="nav-item {"active" if active=="admin" else ""}" href="/admin">🛡️  Painel Admin</a>')
+
+        ui.element("div").style("flex:1; min-height:40px")
+
+        ui.html(f'''
+            <div style="padding:12px 14px;background:#252836;border-radius:8px;margin-bottom:8px">
+                <p style="margin:0;font-size:13px;font-weight:600;color:#e8eaf0">@{username}</p>
+                <p style="margin:2px 0 0;font-size:11px;color:#666980">Desde {created_at}</p>
+                {"<p style='margin:4px 0 0;font-size:11px;color:#7b7ef5;font-weight:600'>⚡ Admin</p>" if is_admin else ""}
+            </div>
+        ''')
+        ui.button("Sair", on_click=do_logout).props("flat").style(
+            "width:100%;color:#f87171;font-size:13px;border-radius:8px"
+        )
+
+# ─── Login ─────────────────────────────────────────────────────────────────────
 
 @ui.page("/")
 def page_login():
     ui.add_head_html(f"<style>{STYLE}</style>")
+    if app.storage.user.get("user"):
+        ui.navigate.to("/dashboard"); return
 
-    # Redireciona se já logado
-    user = app.storage.user.get("user")
-    if user:
-        ui.navigate.to("/dashboard")
-        return
-
-    with ui.column().classes("items-center justify-center").style("min-height:100vh; width:100%"):
+    with ui.column().classes("items-center justify-center").style("min-height:100vh;width:100%"):
         with ui.element("div").classes("auth-card"):
-
-            # Brand
             ui.html('<p class="brand-title">👤  AuthApp</p>')
             ui.html('<p class="brand-sub">Entre na sua conta para continuar</p>')
 
-            msg_area = ui.column().style("width:100%; margin-bottom:12px")
-
+            msg_area = ui.column().style("width:100%;margin-bottom:12px")
             def show_msg(text, tipo="error"):
                 msg_area.clear()
                 with msg_area:
                     ui.html(f'<div class="{tipo}-msg">{text}</div>')
 
-            # Campos
             ui.html('<span class="field-label">E-mail</span>')
-            email_input = ui.input(placeholder="seu@email.com").props(
-                'type=email outlined dense'
-            ).classes("nicegui-input w-full").style("margin-bottom:16px")
-
+            email_in = ui.input(placeholder="seu@email.com").props('type=email outlined dense').classes("nicegui-input w-full").style("margin-bottom:16px")
             ui.html('<span class="field-label">Senha</span>')
-            password_input = ui.input(placeholder="••••••••").props(
-                'type=password outlined dense'
-            ).classes("nicegui-input w-full").style("margin-bottom:24px")
+            pass_in  = ui.input(placeholder="••••••••").props('type=password outlined dense').classes("nicegui-input w-full").style("margin-bottom:24px")
 
             def do_login():
-                ok, result = login_user(email_input.value, password_input.value)
+                ok, result = login_user(email_in.value, pass_in.value)
                 if ok:
                     app.storage.user["user"] = result
                     ui.navigate.to("/dashboard")
                 else:
                     show_msg(result)
 
-            password_input.on("keydown.enter", do_login)
-
+            pass_in.on("keydown.enter", do_login)
             ui.button("Entrar", on_click=do_login).classes("btn-primary")
-
             ui.html('<hr class="divider-line">')
-
             with ui.row().classes("justify-center items-center gap-1"):
-                ui.html('<span style="font-size:13px; color:#666980">Não tem conta?</span>')
+                ui.html('<span style="font-size:13px;color:#666980">Não tem conta?</span>')
                 ui.link("Cadastre-se", "/register").classes("link-btn")
 
-
-# ─── Página de Cadastro ─────────────────────────────────────────────────────────
+# ─── Cadastro ──────────────────────────────────────────────────────────────────
 
 @ui.page("/register")
 def page_register():
     ui.add_head_html(f"<style>{STYLE}</style>")
+    if app.storage.user.get("user"):
+        ui.navigate.to("/dashboard"); return
 
-    user = app.storage.user.get("user")
-    if user:
-        ui.navigate.to("/dashboard")
-        return
-
-    with ui.column().classes("items-center justify-center").style("min-height:100vh; width:100%"):
+    with ui.column().classes("items-center justify-center").style("min-height:100vh;width:100%"):
         with ui.element("div").classes("auth-card"):
-
             ui.html('<p class="brand-title">✨  Criar Conta</p>')
             ui.html('<p class="brand-sub">Preencha os dados para se cadastrar</p>')
 
-            msg_area = ui.column().style("width:100%; margin-bottom:12px")
-
+            msg_area = ui.column().style("width:100%;margin-bottom:12px")
             def show_msg(text, tipo="error"):
                 msg_area.clear()
                 with msg_area:
                     ui.html(f'<div class="{tipo}-msg">{text}</div>')
 
             ui.html('<span class="field-label">Nome de usuário</span>')
-            username_input = ui.input(placeholder="seunome").props(
-                'outlined dense'
-            ).classes("nicegui-input w-full").style("margin-bottom:16px")
-
+            user_in = ui.input(placeholder="seunome").props('outlined dense').classes("nicegui-input w-full").style("margin-bottom:16px")
             ui.html('<span class="field-label">E-mail</span>')
-            email_input = ui.input(placeholder="seu@email.com").props(
-                'type=email outlined dense'
-            ).classes("nicegui-input w-full").style("margin-bottom:16px")
-
+            email_in = ui.input(placeholder="seu@email.com").props('type=email outlined dense').classes("nicegui-input w-full").style("margin-bottom:16px")
             ui.html('<span class="field-label">Senha</span>')
-            password_input = ui.input(placeholder="Mínimo 6 caracteres").props(
-                'type=password outlined dense'
-            ).classes("nicegui-input w-full").style("margin-bottom:24px")
+            pass_in  = ui.input(placeholder="Mínimo 6 caracteres").props('type=password outlined dense').classes("nicegui-input w-full").style("margin-bottom:24px")
 
             def do_register():
-                ok, msg = register_user(
-                    username_input.value,
-                    email_input.value,
-                    password_input.value,
-                )
+                ok, msg = register_user(user_in.value, email_in.value, pass_in.value)
                 if ok:
                     show_msg(msg, "success")
                     ui.timer(1.5, lambda: ui.navigate.to("/"), once=True)
@@ -403,147 +309,207 @@ def page_register():
                     show_msg(msg)
 
             ui.button("Criar conta", on_click=do_register).classes("btn-primary")
-
             ui.html('<hr class="divider-line">')
-
             with ui.row().classes("justify-center items-center gap-1"):
-                ui.html('<span style="font-size:13px; color:#666980">Já tem conta?</span>')
+                ui.html('<span style="font-size:13px;color:#666980">Já tem conta?</span>')
                 ui.link("Faça login", "/").classes("link-btn")
 
-
-# ─── Dashboard (app protegido) ──────────────────────────────────────────────────
+# ─── Dashboard ─────────────────────────────────────────────────────────────────
 
 @ui.page("/dashboard")
 def page_dashboard():
     ui.add_head_html(f"<style>{STYLE}</style>")
-
     user = app.storage.user.get("user")
     if not user:
-        ui.navigate.to("/")
-        return
+        ui.navigate.to("/"); return
 
-    user_id = user["id"]
-    username = user["username"]
+    user_id    = user["id"]
+    username   = user["username"]
     created_at = user.get("created_at", "")[:10]
+    is_admin   = bool(user.get("is_admin", 0))
 
-    def do_logout():
-        app.storage.user.clear()
-        ui.navigate.to("/")
+    with ui.row().style("width:100%;min-height:100vh;gap:0"):
+        build_sidebar(username, created_at, is_admin, active="dashboard")
 
-    with ui.row().style("width:100%; min-height:100vh; gap:0"):
-
-        # ── Sidebar ──
-        with ui.column().classes("dash-sidebar").style("gap:4px"):
-            ui.html(f'''
-                <div style="margin-bottom:28px">
-                    <p style="font-size:18px; font-weight:700; color:#fff; margin:0 0 2px">
-                        AuthApp
-                    </p>
-                    <p style="font-size:12px; color:#4f52d3; margin:0; font-weight:600">
-                        Dashboard
-                    </p>
-                </div>
-            ''')
-
-            ui.html('<a class="nav-item active">📋  Minhas notas</a>')
-            ui.html('<a class="nav-item">📊  Estatísticas</a>')
-            ui.html('<a class="nav-item">⚙️  Configurações</a>')
-
-            ui.element("div").style("flex:1")
-
-            with ui.column().style("gap:4px; margin-top:auto"):
-                ui.html(f'''
-                    <div style="padding:12px 14px; background:#252836; border-radius:8px; margin-bottom:8px">
-                        <p style="margin:0; font-size:13px; font-weight:600; color:#e8eaf0">
-                            @{username}
-                        </p>
-                        <p style="margin:0; font-size:11px; color:#666980">
-                            Desde {created_at}
-                        </p>
-                    </div>
-                ''')
-                ui.button("Sair", on_click=do_logout).props("flat").style(
-                    "width:100%; color:#f87171; font-size:13px; border-radius:8px"
-                )
-
-        # ── Conteúdo ──
         with ui.column().classes("dash-content").style("gap:0"):
-
-            # Header
             with ui.row().classes("items-center justify-between").style("margin-bottom:28px"):
                 ui.html(f'<p class="dash-title">Olá, {username}! 👋</p>')
-                with ui.row().classes("items-center gap-2"):
-                    now = datetime.now().strftime("%d/%m/%Y")
-                    ui.html(f'<span style="font-size:13px; color:#666980">{now}</span>')
+                ui.html(f'<span style="font-size:13px;color:#666980">{datetime.now().strftime("%d/%m/%Y")}</span>')
 
-            # Stats
             notes_data = get_user_notes(user_id)
-            with ui.row().classes("gap-4").style("margin-bottom:28px; width:100%"):
+            with ui.row().classes("gap-4").style("margin-bottom:28px;width:100%"):
                 for label, val, icon in [
                     ("Notas criadas", len(notes_data), "📝"),
                     ("Usuário desde", created_at, "📅"),
-                    ("Status", "Ativo", "✅"),
+                    ("Status", "Admin" if is_admin else "Ativo", "⚡" if is_admin else "✅"),
                 ]:
                     with ui.element("div").classes("stat-card").style("flex:1"):
                         ui.html(f'<p class="stat-label">{icon}  {label}</p>')
                         ui.html(f'<p class="stat-value" style="font-size:24px">{val}</p>')
 
-            # Notas
-            ui.html('''
-                <p style="font-size:16px; font-weight:600; color:#fff; margin:0 0 12px">
-                    📋  Minhas notas
-                </p>
-            ''')
-
-            notes_container = ui.column().style("width:100%; gap:0")
+            ui.html('<p style="font-size:16px;font-weight:600;color:#fff;margin:0 0 12px">📋  Minhas notas</p>')
+            notes_container = ui.column().style("width:100%;gap:0")
 
             def refresh_notes():
                 notes_container.clear()
                 data = get_user_notes(user_id)
                 with notes_container:
                     if not data:
-                        ui.html('''
-                            <div style="text-align:center; padding:40px; color:#666980">
-                                <p style="font-size:32px; margin:0 0 8px">📭</p>
-                                <p style="margin:0; font-size:14px">Nenhuma nota ainda. Crie a primeira!</p>
-                            </div>
-                        ''')
+                        ui.html('<div style="text-align:center;padding:40px;color:#666980"><p style="font-size:32px;margin:0 0 8px">📭</p><p style="margin:0;font-size:14px">Nenhuma nota ainda. Crie a primeira!</p></div>')
                     for note in data:
                         dt = note["created_at"][:16].replace("T", " ")
                         with ui.element("div").classes("note-item"):
                             with ui.row().classes("items-start justify-between"):
-                                with ui.column().style("gap:2px; flex:1"):
-                                    ui.html(f'<p style="margin:0; font-size:14px; color:#e8eaf0">{note["content"]}</p>')
-                                    ui.html(f'<p style="margin:4px 0 0; font-size:11px; color:#666980">{dt}</p>')
+                                with ui.column().style("gap:2px;flex:1"):
+                                    ui.html(f'<p style="margin:0;font-size:14px;color:#e8eaf0">{note["content"]}</p>')
+                                    ui.html(f'<p style="margin:4px 0 0;font-size:11px;color:#666980">{dt}</p>')
                                 def make_delete(nid):
                                     def fn():
                                         delete_note(nid, user_id)
                                         refresh_notes()
                                     return fn
-                                ui.button(icon="delete", on_click=make_delete(note["id"])).props(
-                                    "flat round size=sm"
-                                ).style("color:#ef4444; margin-top:-4px")
+                                ui.button(icon="delete", on_click=make_delete(note["id"])).props("flat round size=sm").style("color:#ef4444")
 
             refresh_notes()
 
-            # Input nova nota
             ui.html('<div style="height:16px"></div>')
             with ui.row().classes("items-center gap-2").style("width:100%"):
-                new_note = ui.input(placeholder="Escreva uma nota...").props(
-                    'outlined dense'
-                ).classes("nicegui-input").style("flex:1")
-
-                def add():
+                new_note = ui.input(placeholder="Escreva uma nota...").props('outlined dense').classes("nicegui-input").style("flex:1")
+                def add_new():
                     if new_note.value.strip():
                         add_note(user_id, new_note.value.strip())
                         new_note.value = ""
                         refresh_notes()
-
-                new_note.on("keydown.enter", add)
-                ui.button("Adicionar", on_click=add).props("unelevated").style(
-                    "background:#4f52d3; color:white; border-radius:10px; height:40px; font-weight:600"
+                new_note.on("keydown.enter", add_new)
+                ui.button("Adicionar", on_click=add_new).props("unelevated").style(
+                    "background:#4f52d3;color:white;border-radius:10px;height:40px;font-weight:600"
                 )
 
+# ─── Painel Admin ───────────────────────────────────────────────────────────────
+
+@ui.page("/admin")
+def page_admin():
+    ui.add_head_html(f"<style>{STYLE}</style>")
+    user = app.storage.user.get("user")
+    if not user:
+        ui.navigate.to("/"); return
+    if not user.get("is_admin"):
+        ui.navigate.to("/dashboard"); return
+
+    username   = user["username"]
+    created_at = user.get("created_at", "")[:10]
+    my_id      = user["id"]
+
+    with ui.row().style("width:100%;min-height:100vh;gap:0"):
+        build_sidebar(username, created_at, True, active="admin")
+
+        with ui.column().classes("dash-content").style("gap:0"):
+            with ui.row().classes("items-center justify-between").style("margin-bottom:28px"):
+                ui.html('<p class="dash-title">🛡️  Painel Admin</p>')
+                ui.html(f'<span style="font-size:13px;color:#666980">{datetime.now().strftime("%d/%m/%Y %H:%M")}</span>')
+
+            stats_row       = ui.row().classes("gap-4").style("margin-bottom:28px;width:100%")
+            table_container = ui.column().style("width:100%")
+
+            def refresh_all():
+                # ── Stats ──
+                stats_row.clear()
+                s = get_stats()
+                with stats_row:
+                    for label, val, icon, color in [
+                        ("Usuários",      s["users"],  "👥", "#7b7ef5"),
+                        ("Notas totais",  s["notes"],  "📝", "#4ade80"),
+                        ("Admins",        s["admins"], "⚡", "#facc15"),
+                        ("Último cadastro", s["newest"], "🆕", "#60a5fa"),
+                    ]:
+                        with ui.element("div").classes("stat-card").style("flex:1"):
+                            ui.html(f'<p class="stat-label">{icon}  {label}</p>')
+                            ui.html(f'<p class="stat-value" style="font-size:20px;color:{color}">{val}</p>')
+
+                # ── Tabela ──
+                table_container.clear()
+                users = get_all_users()
+
+                with table_container:
+                    with ui.row().classes("items-center justify-between").style("margin-bottom:12px"):
+                        ui.html(f'<p style="font-size:16px;font-weight:600;color:#fff;margin:0">Usuários cadastrados <span style="color:#666980;font-size:13px">({len(users)} total)</span></p>')
+                        ui.button(icon="refresh", on_click=refresh_all).props("flat round").style("color:#9395a5")
+
+                    with ui.element("div").classes("table-wrap"):
+                        # Cabeçalho + linhas em HTML puro para visual limpo
+                        rows_html = ""
+                        for u in users:
+                            dt    = u["created_at"][:16].replace("T", " ") if u["created_at"] else "—"
+                            badge = '<span class="badge-admin">Admin</span>' if u["is_admin"] else '<span class="badge-user">Usuário</span>'
+                            me_tag = ' <span style="font-size:10px;color:#666980">(você)</span>' if u["id"] == my_id else ""
+                            rows_html += f"""
+                            <tr>
+                              <td style="font-family:'DM Mono',monospace;color:#666980;font-size:12px">#{u['id']}</td>
+                              <td><strong>@{u['username']}</strong>{me_tag}</td>
+                              <td style="color:#9395a5">{u['email']}</td>
+                              <td>{badge}</td>
+                              <td style="font-family:'DM Mono',monospace;font-size:12px;color:#9395a5">{dt}</td>
+                              <td style="text-align:center;color:#7b7ef5;font-weight:700">{u['note_count']}</td>
+                            </tr>"""
+
+                        ui.html(f"""
+                        <table class="admin-table">
+                          <thead><tr>
+                            <th>#</th><th>Usuário</th><th>E-mail</th>
+                            <th>Papel</th><th>Cadastro</th><th>Notas</th>
+                          </tr></thead>
+                          <tbody>{rows_html}</tbody>
+                        </table>""")
+
+                    # Ações (botões NiceGUI por linha)
+                    ui.html('<p style="font-size:13px;font-weight:600;color:#9395a5;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.5px">Ações por usuário</p>')
+                    with ui.element("div").classes("table-wrap").style("margin-top:0"):
+                        for u in users:
+                            uid   = u["id"]
+                            uname = u["username"]
+                            is_adm = u["is_admin"]
+                            me    = uid == my_id
+
+                            with ui.row().classes("items-center").style(
+                                "padding:10px 16px;border-bottom:1px solid #1e2130;gap:12px"
+                            ):
+                                ui.html(f'<span style="font-size:13px;color:#e8eaf0;font-weight:500;min-width:140px">@{uname}</span>')
+                                ui.html(f'<span style="flex:1;font-size:12px;color:#666980">{u["email"]}</span>')
+
+                                def make_toggle(uid=uid, is_adm=is_adm, uname=uname):
+                                    def fn():
+                                        if uid == my_id:
+                                            ui.notify("Não é possível alterar seu próprio admin.", type="warning")
+                                            return
+                                        toggle_admin(uid, is_adm)
+                                        ui.notify(
+                                            f"@{uname} {'removido dos admins' if is_adm else 'promovido a admin'}.",
+                                            type="positive" if not is_adm else "warning",
+                                        )
+                                        refresh_all()
+                                    return fn
+
+                                def make_delete(uid=uid, uname=uname):
+                                    def fn():
+                                        if uid == my_id:
+                                            ui.notify("Não é possível excluir sua própria conta aqui.", type="warning")
+                                            return
+                                        delete_user(uid)
+                                        ui.notify(f"Usuário @{uname} excluído.", type="negative")
+                                        refresh_all()
+                                    return fn
+
+                                lbl = "⬇️ Remover admin" if is_adm else "⬆️ Tornar admin"
+                                cor = "#f59e0b" if is_adm else "#7b7ef5"
+                                ui.button(lbl, on_click=make_toggle()).props("flat size=sm").style(
+                                    f"color:{cor};font-size:12px"
+                                ).set_enabled(not me)
+
+                                ui.button("🗑️ Excluir", on_click=make_delete()).props("flat size=sm").style(
+                                    "color:#ef4444;font-size:12px"
+                                ).set_enabled(not me)
+
+            refresh_all()
 
 # ─── Inicialização ──────────────────────────────────────────────────────────────
 
